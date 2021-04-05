@@ -109,10 +109,29 @@ def connect():
 
 def ldap_query(connection, options, attr):
     try:
+        page_control = ldap.controls.SimplePagedResultsControl(True, size=500, cookie='')
         if attr:
-            result = connection.search_s(options[0], ldap.SCOPE_SUBTREE, options[1], options[2])
+            response = connection.search_ext(options[0], ldap.SCOPE_SUBTREE, options[1], options[2], serverctrls=[page_control])
         else:
-            result = connection.search_s(options[0], ldap.SCOPE_SUBTREE, options[1])
+            response = connection.search_ext(options[0], ldap.SCOPE_SUBTREE, options[1], [], serverctrls=[page_control])
+        result = []
+        pages = 0
+        while True:
+            pages += 1
+            rtype, rdata, rmsgid, serverctrls = connection.result3(response)
+            result.extend(rdata)
+            controls = [control for control in serverctrls
+                        if control.controlType == ldap.controls.SimplePagedResultsControl.controlType]
+            if not controls:
+                print('The server ignores RFC 2696 control')
+                break
+            if not controls[0].cookie:
+                break
+            page_control.cookie = controls[0].cookie
+            if attr:
+                response = connection.search_ext(options[0], ldap.SCOPE_SUBTREE, options[1], options[2], serverctrls=[page_control])
+            else:
+                response = connection.search_ext(options[0], ldap.SCOPE_SUBTREE, options[1], [], serverctrls=[page_control])
         return ([entry for dn, entry in result if isinstance(entry, dict)])
         
     except ldap.LDAPError as e:
@@ -137,7 +156,10 @@ def recon(connection):
     print(','.join(sid_to_str(result['objectSid'][0]).rsplit('-', 1)[0] for result in results))
 
     # Domain Admins
-    query = [base, '(memberOf:1.2.840.113556.1.4.1941:=cn=Domain Admins,CN=Users,'+base+')', ['sAMAccountName']]
+    query = [base, '(&(ObjectClass=Group)(cn=Domain Admins))', ['distinguishedName']]
+    results = ldap_query(connection, query, 1)
+    dn = results[0]['distinguishedName'][0].decode()
+    query = [base, '(memberOf:1.2.840.113556.1.4.1941:='+dn+')', ['sAMAccountName']]
     results = ldap_query(connection, query, 1)
     cprint("\n[+] Domain Administrators:" ,'red')
     print('\n'.join(result['sAMAccountName'][0].decode() for result in results )) 
@@ -249,7 +271,7 @@ def recon(connection):
         print("None found.")
    
     # Constrained Delegation - Resource Based
-    query = [base, '(msDS-AllowedToActOnBehalfOfOtherIdentity=*)', ['cn', 'msDS-AllowedToActOnBehalfOfOtherIdentity']]
+    query = [base, '(msDS-AllowedToActOnBehalfOfOtherIdentity=*)', ['sAMAccountName', 'msDS-AllowedToActOnBehalfOfOtherIdentity']]
     results = ldap_query(connection, query, 1)
     cprint("\n[+] Contrained Delegation - Resource Based (msDS-AllowedToActOnBehalfOfOtherIdentity):" ,'red')
     if results:
